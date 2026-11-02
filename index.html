@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>ShopGrid - Retail & Inventory Manager</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#059669">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+</head>
+<body class="bg-gray-50">
+<div id="root"><div style="padding:40px;text-align:center;font-family:sans-serif;color:#555">Loading ShopGrid…</div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* =====================================================================
+   ShopGrid v3 – Inventory & Loss Prevention (NO billing / POS / GST)
+   Flow: Login/Sign-up -> Store Setup (name, category, WhatsApp no.) ->
+         auto-generated sections -> Dashboard / Udhar / Audit / Expiry / Settings
+   Demo login: 9999999999 / demo123   (all data in memory – wire to Firestore)
+   Suggested split: /lib  /ui  /modules/{Auth,Setup,Dashboard,Udhar,Audit,Expiry,Settings}
+   ===================================================================== */
+
+/* ---------- lib ---------- */
+const day = n => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+const left = d => (d ? Math.ceil((new Date(d) - new Date().setHours(0, 0, 0, 0)) / 864e5) : null);
+const inr = n => "₹" + Math.round(n).toLocaleString("en-IN");
+const uid = () => Math.random().toString(36).slice(2, 9);
+const cx = (...a) => a.filter(Boolean).join(" ");
+const flags = i => { const d = left(i.exp); return { d, expired: d !== null && d < 0, c3: d !== null && d >= 0 && d <= 3, c7: d !== null && d > 3 && d <= 7, low: i.qty <= i.min }; };
+const stats = items => items.reduce((a, i) => { const f = flags(i); return { units: a.units + i.qty, cost: a.cost + i.qty * i.cost, rev: a.rev + i.qty * i.price, low: a.low + f.low, exp: a.exp + f.expired, near: a.near + f.c3 + f.c7 }; }, { units: 0, cost: 0, rev: 0, low: 0, exp: 0, near: 0 });
+const bal = c => c.tx.reduce((a, t) => a + (t.t === "debit" ? t.a : -t.a), 0);
+const critical = shop => { const all = shop.secs.flatMap(s => s.items.map(i => ({ ...i, sec: s.name, unit: s.unit }))); return { all, low: all.filter(i => flags(i).low), exp: all.filter(i => { const f = flags(i); return f.expired || f.c3 || f.c7; }) }; };
+
+/* ---------- 7 business types: industry-specific fields ---------- */
+const F = (k, l, t = "text") => ({ k, l, t }), SEL = (k, l, o) => ({ k, l, t: "select", o }), CHK = (k, l) => ({ k, l, t: "check" });
+const K = { SM: "Supermarket / Kirana", MD: "Healthcare & Medical", FS: "Fashion & Footwear", JW: "Jewelry", EL: "Electronics & Gadgets", FB: "Food, Beverage & Bakery", AG: "Agri & Fertilizer" };
+const CATS = {
+  [K.SM]: { ic: "🛒", f: [F("batch", "Batch No"), F("shelf", "Shelf life (days)", "number"), F("exp", "Expiry", "date"), SEL("fresh", "Freshness", ["Fresh", "Good", "Stale"])] },
+  [K.MD]: { ic: "💊", f: [F("comp", "Drug composition"), F("batch", "Batch No"), F("exp", "Expiry", "date"), CHK("rx", "Prescription (Rx) only")] },
+  [K.FS]: { ic: "👕", f: [SEL("size", "Size", ["S", "M", "L", "XL", "6", "7", "8", "9", "10"]), F("color", "Color"), F("material", "Material")] },
+  [K.JW]: { ic: "💍", f: [F("wt", "Weight (g / ct)", "number"), SEL("purity", "Purity", ["24K", "22K", "18K", "Silver 925"]), F("making", "Making charges %", "number")] },
+  [K.EL]: { ic: "📱", f: [F("serial", "IMEI / Serial No"), F("warranty", "Warranty (months)", "number")] },
+  [K.FB]: { ic: "🥐", f: [F("exp", "Expiry / Use-by", "date"), SEL("spoil", "Spoilage status", ["Fresh", "Day-old", "Spoiling"])] },
+  [K.AG]: { ic: "🌾", f: [F("bagKg", "Bag weight (kg)", "number"), SEL("chem", "Chemical type", ["Urea", "DAP", "Potash", "Pesticide", "Herbicide", "Organic", "Seed"]), F("exp", "Expiry", "date")] },
+};
+/* default sections per category: [name, unit, sample items [name,qty,cost,price,min,extra]] */
+const SEED = {
+  [K.SM]: [["Groceries", "Kg", [["Toor Dal", 40, 118, 140, 15, { batch: "B2291", shelf: 365, exp: day(90), fresh: "Good" }], ["Sugar", 6, 38, 44, 12, { batch: "S110", shelf: 540, exp: day(200), fresh: "Good" }]]], ["Fruits & Veg", "Kg", [["Tomato", 18, 22, 35, 10, { exp: day(3), fresh: "Fresh" }], ["Banana", 4, 30, 48, 8, { exp: day(2), fresh: "Stale" }]]], ["Dairy & Packaged", "Pcs", [["Curd 400g", 12, 30, 36, 10, { batch: "D118", exp: day(2), fresh: "Fresh" }], ["Biscuits", 20, 22, 30, 12, { batch: "K77", exp: day(-2), fresh: "Stale" }]]]],
+  [K.MD]: [["Tablets", "Strips", [["Paracetamol 500", 60, 12, 18, 20, { comp: "Paracetamol", batch: "P552", exp: day(6), rx: false }], ["Amoxicillin 250", 9, 48, 70, 10, { comp: "Amoxicillin", batch: "A901", exp: day(150), rx: true }]]], ["Syrups", "Bottles", [["Cough Syrup", 14, 62, 85, 6, { comp: "Dextromethorphan", batch: "C33", exp: day(5), rx: false }]]], ["First Aid", "Pcs", [["Bandage Roll", 30, 14, 25, 10, { batch: "F12", exp: day(400), rx: false }]]]],
+  [K.FS]: [["Casual Shirts", "Pcs", [["Cotton Shirt", 14, 420, 799, 5, { size: "L", color: "Blue", material: "Cotton" }], ["Linen Shirt", 3, 650, 1199, 4, { size: "M", color: "White", material: "Linen" }]]], ["Jeans", "Pcs", [["Slim Fit Jeans", 11, 700, 1399, 5, { size: "XL", color: "Indigo", material: "Denim" }]]], ["Footwear", "Pairs", [["Running Shoes", 3, 1100, 1999, 4, { size: "8", color: "Black", material: "Mesh" }], ["Sandals", 16, 280, 549, 6, { size: "9", color: "Brown", material: "Leather" }]]]],
+  [K.JW]: [["Gold Counter", "Pcs", [["Gold Chain", 4, 41000, 44500, 2, { wt: 8, purity: "22K", making: 12 }], ["Gold Ring", 9, 21000, 23400, 3, { wt: 4, purity: "24K", making: 10 }]]], ["Silver Counter", "Pcs", [["Silver Anklet", 10, 2100, 2600, 3, { wt: 40, purity: "Silver 925", making: 8 }]]], ["Imitation", "Pcs", [["Bangles Set", 25, 180, 350, 8, { wt: 30, purity: "18K", making: 0 }]]]],
+  [K.EL]: [["Mobiles", "Pcs", [["Redmi 13C", 6, 8200, 9499, 3, { serial: "IMEI-86502…", warranty: 12 }], ["Galaxy M15", 2, 11500, 13499, 3, { serial: "IMEI-35128…", warranty: 12 }]]], ["Accessories", "Pcs", [["Fast Charger", 25, 220, 399, 8, { serial: "SN-A771", warranty: 6 }]]], ["Appliances", "Pcs", [["Mixer Grinder", 5, 1900, 2799, 3, { serial: "SN-M552", warranty: 24 }]]]],
+  [K.FB]: [["Breads", "Pcs", [["Milk Bread", 20, 28, 40, 10, { exp: day(2), spoil: "Fresh" }], ["Burger Buns", 12, 6, 12, 10, { exp: day(1), spoil: "Day-old" }]]], ["Cakes & Pastries", "Pcs", [["Black Forest Slice", 8, 35, 70, 6, { exp: day(3), spoil: "Fresh" }], ["Veg Puff", 15, 9, 20, 10, { exp: day(-1), spoil: "Spoiling" }]]], ["Beverages", "Pcs", [["Cold Coffee Can", 30, 32, 50, 12, { exp: day(60), spoil: "Fresh" }]]]],
+  [K.AG]: [["Fertilizers", "Bags", [["Urea 50kg", 80, 266, 295, 30, { bagKg: 50, chem: "Urea", exp: day(300) }], ["DAP 50kg", 8, 1250, 1350, 12, { bagKg: 50, chem: "DAP", exp: day(7) }]]], ["Pesticides", "Litres", [["Insecticide 1L", 12, 540, 680, 10, { bagKg: 1, chem: "Pesticide", exp: day(6) }]]], ["Seeds", "Packets", [["Paddy Seed 5kg", 25, 310, 380, 10, { bagKg: 5, chem: "Seed", exp: day(120) }]]]],
+};
+const buildSecs = (type, sample) => SEED[type].map(([name, unit, items]) => ({ id: uid(), name, unit, items: sample ? items.map(([n, qty, cost, price, min, x]) => ({ id: uid(), name: n, qty, cost, price, min, ...x })) : [] }));
+const sampleLedger = () => [{ id: uid(), name: "Ramesh Kumar", phone: "9876500001", due: day(-10), tx: [{ d: day(-30), t: "debit", a: 2400, note: "Goods" }, { d: day(-20), t: "credit", a: 400, note: "Cash" }] }, { id: uid(), name: "Sunita Devi", phone: "9876500002", due: day(5), tx: [{ d: day(-4), t: "debit", a: 1250, note: "Goods" }] }, { id: uid(), name: "Anil Traders", phone: "9876500003", due: day(-3), tx: [{ d: day(-15), t: "debit", a: 8800, note: "Bulk" }] }];
+const makeShop = (name, type, phone, sample) => ({ name, type, phone, secs: buildSecs(type, sample), ledger: sample ? sampleLedger() : [], reports: [] });
+const extras = (type, i) => CATS[type].f.filter(f => i[f.k] !== undefined && i[f.k] !== "").map(f => `${f.l}: ${f.t === "check" ? (i[f.k] ? "Yes" : "No") : i[f.k]}`).join(" · ");
+
+/* ---------- storage (data stays on this device) ---------- */
+const LS = { get: k => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }, set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+
+/* ---------- ui kit ---------- */
+const Card = ({ className, ...p }) => <div className={cx("bg-white border border-gray-200 shadow-sm rounded-xl p-4", className)} {...p} />;
+const Btn = ({ k = "p", className, ...p }) => <button className={cx("rounded-lg px-3 py-2 text-sm font-semibold disabled:opacity-40", k === "p" && "bg-emerald-600 text-white", k === "o" && "border border-cyan-600 text-cyan-700", k === "d" && "bg-red-100 text-red-700", k === "a" && "bg-amber-400 text-gray-900", className)} {...p} />;
+const Inp = p => <input className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 placeholder-gray-400" {...p} />;
+const Sel = ({ o, ...p }) => <select className="w-full bg-white border border-gray-300 rounded-lg px-2 py-2 text-sm text-gray-900" {...p}>{o.map(x => <option key={x.v ?? x} value={x.v ?? x}>{x.l ?? x}</option>)}</select>;
+const Badge = ({ c = "r", pulse, children }) => <span className={cx("text-[11px] font-bold px-2 py-0.5 rounded-full", pulse && "animate-pulse", c === "r" && "bg-red-100 text-red-700", c === "y" && "bg-amber-100 text-amber-800", c === "g" && "bg-emerald-100 text-emerald-800", c === "c" && "bg-cyan-100 text-cyan-800")}>{children}</span>;
+const Stat = ({ l, v, s, c = "text-gray-900" }) => <div className="bg-gray-100 rounded-xl p-2 text-center"><div className="text-[11px] text-gray-500">{l}</div><div className={cx("font-bold text-sm", c)}>{v}</div>{s && <div className="text-[10px] text-gray-500">{s}</div>}</div>;
+
+/* =====================================================================
+   ROOT
+   ===================================================================== */
+function ShopGridV3() {
+  const [users, setUsers] = useState(() => LS.get("shopgrid_users") || [{ name: "Demo Owner", phone: "9999999999", pass: "demo123", shop: makeShop("Sri Lakshmi Multi-Retail & Supermarket", K.SM, "+91 9876543210", true) }]);
+  const [meId, setMeId] = useState(() => LS.get("shopgrid_me"));
+  const [tab, setTab] = useState("dash");
+  const [log, setLog] = useState([]);
+  const [toast, setToast] = useState("");
+  useEffect(() => { LS.set("shopgrid_users", users); }, [users]);
+  useEffect(() => { LS.set("shopgrid_me", meId); }, [meId]);
+  const me = users.find(u => u.phone === meId), shop = me?.shop;
+
+  const say = m => { setToast(m); setTimeout(() => setToast(""), 3500); };
+  const setShop = fn => setUsers(a => a.map(u => (u.phone === meId ? { ...u, shop: fn(u.shop) } : u)));
+  const updSec = (sid, fn) => setShop(s => ({ ...s, secs: s.secs.map(x => (x.id === sid ? { ...x, items: fn(x.items) } : x)) }));
+  const send = (type, msg, quiet) => { setLog(l => [{ id: uid(), t: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }), type, msg: type === "call" ? `[Caller ID ${shop.phone}] ${msg}` : `[→ ${shop.phone}] ${msg}` }, ...l]); if (!quiet) say(type === "call" ? "📞 AI call queued" : "💬 WhatsApp alert queued"); };
+  const logout = () => confirm("Logout from ShopGrid?") && (setMeId(null), setTab("dash"));
+
+  if (!me) return <Auth users={users} setUsers={setUsers} login={setMeId} />;
+  if (!shop) return <Setup onDone={(n, t, p, s) => setShop(() => makeShop(n, t, p, s))} />;
+
+  const ctx = { shop, setShop, updSec, say, send, log };
+  const tabs = [["dash", "📊 Dashboard"], ["udhar", "📒 Udhar & AI Calls"], ["audit", "🔍 Stock Audit"], ["exp", "⏰ Expiry Hub"], ["set", "⚙️ Settings"]];
+  return (
+    <div className="min-h-screen bg-gray-50 text-gray-900 pb-16">
+      <AutoAlerts shop={shop} send={send} />
+      <header className="px-3 py-2 border-b border-gray-200 flex justify-between items-center gap-2"><div><div className="font-extrabold text-emerald-700 leading-tight">🛡️ ShopGrid</div><div className="text-[11px] text-gray-500">{CATS[shop.type].ic} {shop.name}</div></div><Badge c="g">WhatsApp: {shop.phone}</Badge></header>
+      <AlertBar shop={shop} send={send} go={setTab} />
+      <nav className="flex overflow-x-auto gap-1 px-2 py-2 sticky top-0 z-10 bg-gray-50 border-b border-gray-200">{tabs.map(([k, l]) => <button key={k} onClick={() => setTab(k)} className={cx("whitespace-nowrap px-3 py-1.5 rounded-full text-sm", tab === k ? "bg-emerald-600 text-white font-bold" : "bg-white text-gray-700")}>{l}</button>)}</nav>
+      <main className="max-w-6xl mx-auto p-3 space-y-3">
+        {tab === "dash" && <Dashboard {...ctx} />}
+        {tab === "udhar" && <Udhar {...ctx} />}
+        {tab === "audit" && <Audit {...ctx} />}
+        {tab === "exp" && <Expiry {...ctx} />}
+        {tab === "set" && <Settings {...ctx} logout={logout} />}
+      </main>
+      {toast && <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-gray-900 text-white font-semibold text-sm px-4 py-2 rounded-full shadow-lg max-w-[92vw] text-center">{toast}</div>}
+    </div>
+  );
+}
+
+/* Auto-fires one WhatsApp alert whenever the set of critical items changes (demo of backend cron/trigger) */
+function AutoAlerts({ shop, send }) {
+  const { low, exp } = critical(shop), key = [...low, ...exp].map(i => i.id).sort().join(), last = useRef("");
+  useEffect(() => {
+    if (key && key !== last.current) { send("whatsapp", `AUTO ALERT: ${low.length} low-stock (${low.slice(0, 3).map(i => i.name).join(", ")}) · ${exp.length} expiring/expired (${exp.slice(0, 3).map(i => i.name).join(", ")})`, true); }
+    last.current = key;
+  }, [key]); // eslint-disable-line
+  return null;
+}
+
+/* Top critical alert bar (blinking) */
+function AlertBar({ shop, send, go }) {
+  const { low, exp } = critical(shop);
+  if (!low.length && !exp.length) return <div className="bg-emerald-50 text-emerald-700 text-xs text-center py-1">✅ No critical stock or expiry alerts</div>;
+  const reorder = () => send("whatsapp", "REORDER LIST: " + low.map(i => `${i.name} – order ${Math.max(i.min * 2 - i.qty, 1)} ${i.unit}`).join("; "));
+  return (
+    <div className="animate-pulse bg-red-50 border-y border-red-300 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-sm">
+      <div><b className="text-red-700">🚨 {low.length} low-stock</b> <span className="text-amber-700">· ⏰ {exp.length} expiring / expired</span></div>
+      <div className="flex gap-2"><Btn k="a" disabled={!low.length} onClick={reorder}>🔁 Auto-Reorder via WhatsApp</Btn><Btn k="o" onClick={() => go("exp")}>Expiry Hub</Btn></div>
+    </div>
+  );
+}
+
+/* =====================================================================
+   MODULE: Auth + Setup
+   ===================================================================== */
+function Auth({ users, setUsers, login }) {
+  const [mode, setMode] = useState("login"), [f, setF] = useState({}), [err, setErr] = useState("");
+  const set = k => e => setF({ ...f, [k]: e.target.value });
+  const submit = e => {
+    e.preventDefault(); setErr(""); const ph = (f.phone || "").replace(/\D/g, "").slice(-10);
+    if (mode === "login") { const u = users.find(x => x.phone === ph && x.pass === f.pass); return u ? login(u.phone) : setErr("Wrong phone or password"); }
+    if (ph.length < 10 || (f.pass || "").length < 6) return setErr("Enter a 10-digit phone and 6+ character password");
+    if (users.some(x => x.phone === ph)) return setErr("Phone already registered");
+    setUsers(a => [...a, { name: f.name, phone: ph, pass: f.pass, shop: null }]); login(ph);
+  };
+  return (
+    <div className="min-h-screen bg-gray-50 text-gray-900 flex items-center justify-center p-4"><div className="w-full max-w-sm space-y-3">
+      <div className="text-center"><div className="text-4xl">🛡️</div><div className="text-2xl font-extrabold text-emerald-700">ShopGrid</div><div className="text-xs text-gray-500">Stock · Expiry · Loss Prevention · Udhar</div></div>
+      <div className="grid grid-cols-2 bg-white border border-gray-200 rounded-lg overflow-hidden text-sm font-semibold">{[["login", "Login"], ["signup", "Sign Up"]].map(([k, l]) => <button key={k} onClick={() => { setMode(k); setErr(""); }} className={cx("py-2", mode === k ? "bg-emerald-600 text-white" : "text-gray-700")}>{l}</button>)}</div>
+      <Card><form onSubmit={submit} className="space-y-2">
+        {mode === "signup" && <Inp required placeholder="Your name" onChange={set("name")} />}
+        <Inp required type="tel" placeholder="Phone number" onChange={set("phone")} /><Inp required type="password" placeholder="Password" onChange={set("pass")} />
+        {err && <div className="text-red-600 text-xs">{err}</div>}<Btn className="w-full">{mode === "login" ? "Login" : "Create Account"}</Btn></form></Card>
+      {mode === "login" && <Btn k="o" className="w-full" onClick={() => login("9999999999")}>▶ Open Demo Store (Supermarket)</Btn>}
+      <p className="text-[11px] text-gray-500 text-center">Demo auth only. Production: Firebase Auth (phone OTP) with hashed credentials.</p></div></div>
+  );
+}
+
+function Setup({ onDone }) {
+  const [f, setF] = useState({ type: K.SM, sample: true });
+  return (
+    <div className="min-h-screen bg-gray-50 text-gray-900 flex items-center justify-center p-4"><div className="w-full max-w-md space-y-3">
+      <div className="text-center"><div className="text-3xl">🏪</div><div className="text-xl font-extrabold text-emerald-700">Set up your store</div><div className="text-xs text-gray-500">ShopGrid will create sections & fields for your business type</div></div>
+      <Card><form className="space-y-3" onSubmit={e => { e.preventDefault(); onDone(f.name, f.type, f.phone, f.sample); }}>
+        <label className="block text-xs text-gray-500">Business / Shop name<Inp required className="mt-1" placeholder="Sri Lakshmi Multi-Retail & Supermarket" onChange={e => setF({ ...f, name: e.target.value })} /></label>
+        <label className="block text-xs text-gray-500">Business category<Sel o={Object.keys(CATS).map(k => ({ v: k, l: `${CATS[k].ic} ${k}` }))} value={f.type} onChange={e => setF({ ...f, type: e.target.value })} /></label>
+        <div className="text-[11px] text-cyan-700">Sections to be created: {SEED[f.type].map(s => s[0]).join(" · ")}</div>
+        <label className="block text-xs text-gray-500">Owner WhatsApp / alert number<Inp required type="tel" className="mt-1" placeholder="+91 9876543210" onChange={e => setF({ ...f, phone: e.target.value })} /></label>
+        <label className="flex items-center gap-2 text-xs text-gray-700"><input type="checkbox" checked={f.sample} onChange={e => setF({ ...f, sample: e.target.checked })} />Fill with sample stock & customers</label>
+        <Btn className="w-full">Create My Store →</Btn></form></Card></div></div>
+  );
+}
+
+/* =====================================================================
+   MODULE: Dashboard – section cards with valuation + inspection drawer
+   ===================================================================== */
+function Dashboard({ shop, setShop, updSec, say }) {
+  const [open, setOpen] = useState(null), [f, setF] = useState({}), [ns, setNs] = useState("");
+  const { all } = critical(shop), T = stats(all), fields = CATS[shop.type].f;
+  const add = (s, e) => { e.preventDefault(); updSec(s.id, a => [...a, { id: uid(), ...f, qty: +f.qty, cost: +f.cost, price: +f.price, min: +(f.min || 5) }]); setF({}); say("Item added"); };
+  return <>
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <Card><div className="text-xs text-gray-500">Total Stock</div><div className="text-2xl font-extrabold">{Math.round(T.units).toLocaleString("en-IN")}</div><div className="text-[11px] text-gray-500">{all.length} items · {shop.secs.length} sections</div></Card>
+      <Card><div className="text-xs text-gray-500">Purchase Value (Investment)</div><div className="text-xl font-extrabold">{inr(T.cost)}</div></Card>
+      <Card><div className="text-xs text-gray-500">Sales Value (Expected)</div><div className="text-xl font-extrabold text-emerald-700">{inr(T.rev)}</div></Card>
+      <Card><div className="text-xs text-gray-500">Projected Gross Margin</div><div className="text-xl font-extrabold text-cyan-700">{inr(T.rev - T.cost)}</div><div className="text-[11px] text-gray-500">{T.cost ? Math.round(((T.rev - T.cost) / T.rev) * 100) : 0}% of sales value</div></Card>
+    </div>
+    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">{shop.secs.map(s => { const st = stats(s.items), o = open === s.id; return (
+      <Card key={s.id} className={cx(o && "sm:col-span-2 lg:col-span-3 border-cyan-500")}>
+        <div className="flex justify-between items-start"><b>{CATS[shop.type].ic} {s.name}</b><div className="flex gap-1 flex-wrap justify-end">{st.exp > 0 && <Badge pulse>{st.exp} expired</Badge>}{st.low > 0 && <Badge pulse>{st.low} low</Badge>}{st.near > 0 && <Badge c="y">{st.near} near expiry</Badge>}</div></div>
+        <div className="grid grid-cols-4 gap-2 mt-2"><Stat l={`Stock (${s.unit})`} v={Math.round(st.units)} /><Stat l="Purchase" v={inr(st.cost)} /><Stat l="Sales" v={inr(st.rev)} c="text-emerald-700" /><Stat l="Margin" v={inr(st.rev - st.cost)} s={st.cost ? Math.round(((st.rev - st.cost) / st.cost) * 100) + "% on cost" : ""} c="text-cyan-700" /></div>
+        <Btn k="o" className="w-full mt-2" onClick={() => { setOpen(o ? null : s.id); setF({}); }}>{o ? "Close drawer ▲" : "🔎 Inspect section ▼"}</Btn>
+        {o && <div className="mt-3 space-y-2">
+          <form onSubmit={e => add(s, e)} className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-gray-100 p-3 rounded-xl">
+            <div className="col-span-2"><Inp required placeholder="Item name" value={f.name || ""} onChange={e => setF({ ...f, name: e.target.value })} /></div>
+            <Inp required type="number" step="any" placeholder={`Qty (${s.unit})`} value={f.qty || ""} onChange={e => setF({ ...f, qty: e.target.value })} /><Inp type="number" placeholder="Low-stock level" value={f.min || ""} onChange={e => setF({ ...f, min: e.target.value })} />
+            <Inp required type="number" step="any" placeholder="Purchase ₹" value={f.cost || ""} onChange={e => setF({ ...f, cost: e.target.value })} /><Inp required type="number" step="any" placeholder="Sales ₹" value={f.price || ""} onChange={e => setF({ ...f, price: e.target.value })} />
+            {fields.map(d => d.t === "select" ? <Sel key={d.k} o={[{ v: "", l: d.l }, ...d.o]} value={f[d.k] || ""} onChange={e => setF({ ...f, [d.k]: e.target.value })} />
+              : d.t === "check" ? <label key={d.k} className="flex items-center gap-2 text-xs text-gray-700"><input type="checkbox" checked={!!f[d.k]} onChange={e => setF({ ...f, [d.k]: e.target.checked })} />{d.l}</label>
+              : <Inp key={d.k} type={d.t} step="any" placeholder={d.l} title={d.l} value={f[d.k] || ""} onChange={e => setF({ ...f, [d.k]: e.target.value })} />)}
+            <Btn className="col-span-2 sm:col-span-4">+ Add item to {s.name}</Btn></form>
+          {s.items.map(i => { const fl = flags(i); return <div key={i.id} className="border-t border-gray-200 pt-2 flex justify-between gap-2 text-sm"><div><div className="font-medium">{i.name}</div><div className="text-[11px] text-gray-500">{extras(shop.type, i)}</div>
+            <div className="flex gap-1 mt-1 flex-wrap">{fl.expired && <Badge pulse>Expired</Badge>}{fl.low && <Badge pulse>Low stock</Badge>}{fl.c3 && <Badge pulse>{fl.d}d left</Badge>}{fl.c7 && <Badge c="y">{fl.d}d left</Badge>}{(i.fresh === "Stale" || i.spoil === "Spoiling") && <Badge c="y">{i.fresh || i.spoil}</Badge>}</div></div>
+            <div className="text-right"><div className="font-bold">{i.qty} <span className="text-xs text-gray-500">{s.unit}</span></div><div className="text-[11px] text-gray-500">{inr(i.cost)} → {inr(i.price)}</div><button className="text-[11px] text-red-600" onClick={() => updSec(s.id, a => a.filter(x => x.id !== i.id))}>remove</button></div></div>; })}
+          <button className="text-xs text-red-600" onClick={() => confirm("Delete this section and its items?") && (setShop(x => ({ ...x, secs: x.secs.filter(y => y.id !== s.id) })), setOpen(null))}>Delete section</button></div>}
+      </Card>); })}
+      <Card className="border-dashed"><b className="text-sm">➕ Custom Section</b><div className="flex gap-2 mt-2"><Inp placeholder="e.g. Seasonal Offers" value={ns} onChange={e => setNs(e.target.value)} /><Btn onClick={() => { if (ns.trim()) { setShop(x => ({ ...x, secs: [...x.secs, { id: uid(), name: ns.trim(), unit: "Pcs", items: [] }] })); setNs(""); } }}>Add</Btn></div></Card></div>
+  </>;
+}
+
+/* =====================================================================
+   MODULE: Udhar & AI Calls
+   ===================================================================== */
+function Udhar({ shop, setShop, send, say, log }) {
+  const [openId, setOpenId] = useState(null), [f, setF] = useState({ t: "debit" }), [n, setN] = useState({});
+  const c = shop.ledger.find(x => x.id === openId), owed = shop.ledger.reduce((a, x) => a + Math.max(0, bal(x)), 0);
+  const upd = fn => setShop(s => ({ ...s, ledger: s.ledger.map(x => (x.id === openId ? fn(x) : x)) }));
+  const call = x => send("call", `AI → ${x.name} (${x.phone}): "Namaste ${x.name}, ₹${bal(x)} is pending at ${shop.name}. Kindly pay today."`);
+  const calls = log.filter(l => l.type === "call");
+  if (c) { const b = bal(c); let run = 0; return <>
+    <button className="text-cyan-700 text-sm" onClick={() => setOpenId(null)}>← All customers</button>
+    <Card><b>{c.name}</b> <span className="text-xs text-gray-500">{c.phone} · due {c.due}</span><div className={cx("text-2xl font-extrabold", b > 0 ? "text-red-600" : "text-emerald-700")}>{inr(Math.abs(b))} <span className="text-sm">{b > 0 ? "to collect" : "settled"}</span></div>{b > 0 && <Btn k="o" className="mt-2" onClick={() => call(c)}>📞 1-Click AI Reminder Call</Btn>}</Card>
+    <Card><form className="grid grid-cols-3 gap-2" onSubmit={e => { e.preventDefault(); upd(x => ({ ...x, tx: [...x.tx, { d: day(0), t: f.t, a: +f.a, note: f.note || "" }] })); setF({ t: f.t }); say("Entry added"); }}>
+      <Sel o={[{ v: "debit", l: "Gave Udhar (+)" }, { v: "credit", l: "Received (−)" }]} value={f.t} onChange={e => setF({ ...f, t: e.target.value })} /><Inp required type="number" placeholder="₹" value={f.a || ""} onChange={e => setF({ ...f, a: e.target.value })} /><Inp placeholder="Note" value={f.note || ""} onChange={e => setF({ ...f, note: e.target.value })} /><Btn className="col-span-3">Add Entry</Btn></form></Card>
+    <Card><b className="text-sm">History</b>{c.tx.map(t => { run += t.t === "debit" ? t.a : -t.a; return { ...t, run }; }).reverse().map((t, k) => <div key={k} className="flex justify-between text-sm border-t border-gray-200 py-1"><div>{t.d} · {t.note}<div className="text-[11px] text-gray-500">Balance {inr(t.run)}</div></div><b className={t.t === "debit" ? "text-red-600" : "text-emerald-700"}>{t.t === "debit" ? "+" : "−"}{inr(t.a)}</b></div>)}</Card></>; }
+  const od = shop.ledger.filter(x => bal(x) > 0 && left(x.due) < 0);
+  return <>
+    <Card className="border-cyan-500"><div className="text-xs text-gray-500">Total Outstanding Udhar</div><div className="text-3xl font-extrabold text-cyan-700">{inr(owed)}</div><div className="text-xs text-gray-500 mb-2">{od.length} overdue customers</div><Btn k="o" disabled={!od.length} onClick={() => od.forEach(call)}>📞 AI Calls to All Overdue</Btn></Card>
+    <Card><form className="flex gap-2" onSubmit={e => { e.preventDefault(); setShop(s => ({ ...s, ledger: [...s.ledger, { id: uid(), name: n.name, phone: n.phone || "", due: day(15), tx: [] }] })); setN({}); }}><Inp required placeholder="Customer name" value={n.name || ""} onChange={e => setN({ ...n, name: e.target.value })} /><Inp type="tel" placeholder="Phone" value={n.phone || ""} onChange={e => setN({ ...n, phone: e.target.value })} /><Btn>+</Btn></form></Card>
+    <Card>{shop.ledger.map(x => { const b = bal(x), o = b > 0 && left(x.due) < 0; return <div key={x.id} className="flex justify-between items-center border-t border-gray-200 first:border-0 py-2 text-sm"><span onClick={() => setOpenId(x.id)} className="cursor-pointer">{x.name} {o && <Badge pulse>overdue</Badge>}</span><span className="flex items-center gap-2"><b className={b > 0 ? "text-red-600" : "text-emerald-700"}>{inr(b)}</b>{b > 0 && <button onClick={() => call(x)}>📞</button>}</span></div>; })}</Card>
+    <Card><b className="text-sm">📡 AI Call & WhatsApp Log</b><div className="mt-2 space-y-1 text-xs max-h-48 overflow-auto">{log.map(l => <div key={l.id} className="flex gap-2"><span className="text-gray-500">{l.t}</span><Badge c={l.type === "call" ? "c" : "g"}>{l.type}</Badge><span className="text-gray-700">{l.msg}</span></div>)}{!log.length && <span className="text-gray-500">Nothing sent yet.</span>}{calls.length === 0 && log.length > 0 && <span className="text-gray-500">No calls yet – tap 📞.</span>}</div></Card></>;
+}
+
+/* =====================================================================
+   MODULE: Stock Audit / Theft Tally
+   Expected closing = Opening + Received − Sold(recorded).  Shortage = Expected − Physical.
+   ===================================================================== */
+function Audit({ shop, setShop, updSec, say, send }) {
+  const [sid, setSid] = useState(shop.secs[0]?.id), [v, setV] = useState({});
+  const s = shop.secs.find(x => x.id === sid) || shop.secs[0];
+  const set = (id, k, val) => setV({ ...v, [id]: { ...v[id], [k]: val } });
+  const rows = (s?.items || []).map(i => { const r = v[i.id] || {}, has = r.phys !== undefined && r.phys !== "", exp = i.qty + +(r.recv || 0) - +(r.sold || 0), diff = has ? +r.phys - exp : null; return { i, has, exp, diff, r, loss: diff < 0 ? -diff * i.cost : 0 }; });
+  const total = rows.reduce((a, x) => a + x.loss, 0);
+  const save = () => {
+    const done = rows.filter(x => x.has); if (!done.length) return say("Enter at least one physical count");
+    const rep = { id: uid(), date: day(0), sec: s.name, loss: total, rows: done.map(x => ({ name: x.i.name, open: x.i.qty, recv: +(x.r.recv || 0), sold: +(x.r.sold || 0), exp: x.exp, phys: +x.r.phys, loss: x.loss })) };
+    done.forEach(x => updSec(s.id, a => a.map(i => (i.id === x.i.id ? { ...i, qty: +x.r.phys } : i))));
+    setShop(z => ({ ...z, reports: [rep, ...z.reports] })); setV({});
+    if (total > 0) send("whatsapp", `THEFT/SHRINKAGE ALERT – ${s.name}: ${inr(total)} short (${done.filter(x => x.loss).map(x => x.i.name).join(", ")})`); else say("Audit saved – no shortage ✅");
+  };
+  return <>
+    <Card><b>🔍 Evening Stock Audit / Theft Tally</b><p className="text-xs text-gray-500 my-1">Expected closing = Opening + Received − Sold (recorded). Shortage = Expected − Physical count, valued at purchase price.</p>
+      <Sel o={shop.secs.map(x => ({ v: x.id, l: `${CATS[shop.type].ic} ${x.name}` }))} value={s?.id} onChange={e => { setSid(e.target.value); setV({}); }} />
+      <div className="grid grid-cols-12 gap-1 text-[10px] text-gray-500 mt-3 px-1"><div className="col-span-3">Item</div><div className="col-span-2">Opening</div><div className="col-span-2">+Recv</div><div className="col-span-2">−Sold</div><div className="col-span-3">Physical</div></div>
+      {rows.map(({ i, has, exp, diff, r, loss }) => <div key={i.id} className="border-t border-gray-200 py-2 text-sm"><div className="grid grid-cols-12 gap-1 items-center"><div className="col-span-3 text-xs">{i.name}</div><div className="col-span-2 text-gray-500">{i.qty}</div>
+        <div className="col-span-2"><Inp type="number" step="any" value={r.recv ?? ""} onChange={e => set(i.id, "recv", e.target.value)} /></div><div className="col-span-2"><Inp type="number" step="any" value={r.sold ?? ""} onChange={e => set(i.id, "sold", e.target.value)} /></div><div className="col-span-3"><Inp type="number" step="any" placeholder="Count" value={r.phys ?? ""} onChange={e => set(i.id, "phys", e.target.value)} /></div></div>
+        {has && <div className={cx("text-xs text-right mt-1 font-bold", diff < 0 ? "text-red-600" : "text-emerald-700")}>Expected {exp} · {diff === 0 ? "✓ Match" : diff < 0 ? `⚠ Short ${-diff} (−${inr(loss)})` : `Extra ${diff}`}</div>}</div>)}
+      <div className="flex justify-between items-center mt-3"><b className={total ? "text-red-600" : "text-gray-500"}>Total shortage: {inr(total)}</b><Btn onClick={save}>Save & Sync Stock</Btn></div></Card>
+    <Card><b className="text-sm">🚨 Audit History</b>{!shop.reports.length && <div className="text-xs text-gray-500 mt-1">No audits yet.</div>}{shop.reports.map(r => <div key={r.id} className="border-t border-gray-200 mt-2 pt-2 text-sm"><div className="flex justify-between"><span>{r.sec} · {r.date}</span><b className={r.loss ? "text-red-600" : "text-emerald-700"}>{r.loss ? "−" + inr(r.loss) : "Match"}</b></div>{r.rows.filter(x => x.loss).map(x => <div key={x.name} className="text-[11px] text-red-700">• {x.name}: expected {x.exp}, counted {x.phys}</div>)}</div>)}</Card></>;
+}
+
+/* =====================================================================
+   MODULE: Expiry Clearance Hub
+   ===================================================================== */
+function Expiry({ shop, updSec, say, send }) {
+  const [pct, setPct] = useState({});
+  const list = useMemo(() => shop.secs.flatMap(s => s.items.filter(i => i.exp && flags(i).d <= 7 && i.qty > 0).map(i => ({ ...i, sid: s.id, sec: s.name }))).sort((a, b) => left(a.exp) - left(b.exp)), [shop]);
+  const disc = i => { const p = +(pct[i.id] ?? 20), base = i.orig ?? i.price, np = Math.round(base * (1 - p / 100)); updSec(i.sid, a => a.map(x => (x.id === i.id ? { ...x, orig: base, price: np } : x))); say(`${i.name}: ${p}% off → ${inr(np)}${np < i.cost ? " (below cost!)" : ""}`); };
+  const wo = i => { updSec(i.sid, a => a.map(x => (x.id === i.id ? { ...x, qty: 0 } : x))); say(`Written off ${i.name} (loss ${inr(i.qty * i.cost)})`); };
+  return <Card><div className="flex justify-between items-center"><b>⏰ Expiry Clearance Hub</b><Btn k="o" disabled={!list.length} onClick={() => send("whatsapp", "EXPIRY: " + list.map(i => `${i.name} (${flags(i).expired ? "expired" : flags(i).d + "d"})`).join(", "))}>💬 Alert Owner</Btn></div><p className="text-xs text-gray-500 mb-2">Expired or expiring within 7 days. Push a discount or write off.</p>
+    {!list.length && <div className="text-sm text-gray-500">Nothing at risk 🎉</div>}
+    {list.map(i => { const fl = flags(i); return <div key={i.id} className="border-t border-gray-200 py-2 flex flex-wrap justify-between gap-2 text-sm"><div><div className="font-medium">{i.name} <span className="text-xs text-gray-500">· {i.sec}</span></div><div className="flex gap-1 items-center">{fl.expired ? <Badge pulse>Expired – remove</Badge> : fl.c3 ? <Badge pulse>{fl.d} days</Badge> : <Badge c="y">{fl.d} days</Badge>}<span className="text-[11px] text-gray-500">{i.qty} units · {inr(i.price)}{i.orig ? ` (was ${inr(i.orig)})` : ""}</span></div></div>
+      <div className="flex items-center gap-1">{!fl.expired && <><div className="w-24"><Sel o={[10, 20, 30, 40, 50].map(p => ({ v: p, l: p + "% off" }))} value={pct[i.id] ?? 20} onChange={e => setPct({ ...pct, [i.id]: e.target.value })} /></div><Btn onClick={() => disc(i)}>Apply</Btn></>}<Btn k="d" onClick={() => wo(i)}>Write-off</Btn></div></div>; })}</Card>;
+}
+
+/* =====================================================================
+   MODULE: Settings & Logout
+   ===================================================================== */
+function Settings({ shop, setShop, say, send, logout }) {
+  const [f, setF] = useState({ name: shop.name, phone: shop.phone }), [t, setT] = useState(shop.type);
+  return <>
+    <Card className="space-y-2"><b>🏪 Store Profile</b>
+      <label className="block text-xs text-gray-500">Business name<Inp className="mt-1" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></label>
+      <label className="block text-xs text-gray-500">Owner WhatsApp / alert number<Inp className="mt-1" value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} /></label>
+      <div className="text-xs text-gray-500">Category: <Badge c="c">{CATS[shop.type].ic} {shop.type}</Badge></div>
+      <div className="flex gap-2"><Btn onClick={() => { setShop(s => ({ ...s, ...f })); say("Profile saved"); }}>Save</Btn><Btn k="o" onClick={() => send("whatsapp", "✅ Test alert from ShopGrid – WhatsApp alerts are working.")}>Send test WhatsApp</Btn></div></Card>
+    <Card className="space-y-2"><b>🔄 Switch Business Type (loads sample data)</b><p className="text-xs text-gray-500">Try every industry: sections, fields and sample stock are regenerated. Current stock will be replaced.</p>
+      <Sel o={Object.keys(CATS).map(k => ({ v: k, l: `${CATS[k].ic} ${k}` }))} value={t} onChange={e => setT(e.target.value)} />
+      <Btn k="a" onClick={() => confirm("Replace current sections and stock with sample data?") && (setShop(s => ({ ...s, type: t, secs: buildSecs(t, true), reports: [] })), say("Loaded " + t))}>Load sample for this category</Btn></Card>
+    <Btn k="d" className="w-full" onClick={logout}>🚪 Logout</Btn></>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<ShopGridV3 />);
+</script>
+<script>
+if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
+</script>
+</body>
+</html>
